@@ -97,6 +97,56 @@ abstract class FirstOrderMinimizer[T, DF<:StochasticDiffFunction[T]](val converg
     }
   }
 
+  /**
+   * initIterator, oneRound, isConvergence, this three function is the replicated implement of
+   * iterations and infiniteIterations function.
+   */
+  private var failedOnce = false
+  private var adjustedFun: DF = _
+  private var iterState: State = _
+
+  def initIterator(f: DF, init: T): Unit = {
+    this.failedOnce = false
+    this.adjustedFun = adjustFunction(f)
+    this.iterState = initialState(adjustedFun, init)
+  }
+
+  def oneRound: State = {
+    try {
+      val dir = chooseDescentDirection(this.iterState, adjustedFun)
+      val stepSize = determineStepSize(this.iterState, adjustedFun, dir)
+      logger.info(f"Step Size: $stepSize%.4g")
+      val x = takeStep(this.iterState,dir,stepSize)
+      val (value,grad) = calculateObjective(adjustedFun, x, this.iterState.history)
+      val (adjValue,adjGrad) = adjust(x,grad,value)
+      val oneOffImprovement = (this.iterState.adjustedValue - adjValue)/(this.iterState.adjustedValue.abs max adjValue.abs max 1E-6 * this.iterState.initialAdjVal.abs)
+      logger.info(f"Val and Grad Norm: $adjValue%.6g (rel: $oneOffImprovement%.3g) ${norm(adjGrad)}%.6g")
+      val history = updateHistory(x,grad,value, adjustedFun, this.iterState)
+      val newCInfo = convergenceCheck.update(x, grad, value, this.iterState, this.iterState.convergenceInfo)
+      failedOnce = false
+      FirstOrderMinimizer.State(x, value, grad, adjValue, adjGrad, this.iterState.iter + 1, this.iterState.initialAdjVal, history, newCInfo)
+    } catch {
+      case x: FirstOrderException if !failedOnce =>
+        failedOnce = true
+        logger.error("Failure! Resetting history: " + x)
+        this.iterState.copy(history = initialHistory(adjustedFun, this.iterState.x))
+      case x: FirstOrderException =>
+        logger.error("Failure again! Giving up and returning. Maybe the objective is just poorly behaved?")
+        this.iterState.copy(searchFailed = true)
+    }
+    iterState
+  }
+
+  def isConvergence: Boolean = {
+    convergenceCheck.apply(this.iterState, this.iterState.convergenceInfo) match {
+      case Some(converged) =>
+        logger.info(s"Converged because ${converged.reason}")
+        true
+      case None =>
+        false
+    }
+  }
+
   def minimize(f: DF, init: T): T = {
     minimizeAndReturnState(f, init).x
   }
